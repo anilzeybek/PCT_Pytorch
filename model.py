@@ -3,6 +3,38 @@ import torch.nn as nn
 import torch.nn.functional as F
 from util import sample_and_group 
 
+
+class PointCloudDecoder(nn.Module):
+    def __init__(self, input_channels, output_channels=3, hidden_dim=128, num_heads=8, num_layers=6):
+        super(PointCloudDecoder, self).__init__()
+        self.fc1 = nn.Linear(input_channels, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_channels)
+
+        transformer_layer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=num_heads)
+        self.transformer_decoder = nn.TransformerDecoder(transformer_layer, num_layers=num_layers)
+
+    def forward(self, x, max_points=1024):
+        generated_points = []
+        hidden_state = self.initialize_hidden_state(x)
+
+        for _ in range(max_points):
+            hidden_state, point = self.step(x, hidden_state)
+            generated_points.append(point)
+
+            # TODO Include your stopping condition here
+            # maybe
+
+        return torch.stack(generated_points, dim=1)
+
+    def initialize_hidden_state(self, x):
+        # Simple initialization, can be modified
+        return F.relu(self.fc1(x))
+
+    def step(self, x, hidden_state):
+        updated_state = self.transformer_decoder(x.unsqueeze(0), hidden_state.unsqueeze(0)).squeeze(0)
+        point = self.fc2(updated_state)
+        return updated_state, point
+
 class Local_op(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(Local_op, self).__init__()
@@ -23,7 +55,7 @@ class Local_op(nn.Module):
         return x
 
 class Pct(nn.Module):
-    def __init__(self, args, output_channels=40):
+    def __init__(self, args, output_channels=3):
         super(Pct, self).__init__()
         self.args = args
         self.conv1 = nn.Conv1d(3, 64, kernel_size=1, bias=False)
@@ -40,13 +72,13 @@ class Pct(nn.Module):
                                     nn.LeakyReLU(negative_slope=0.2))
 
 
-        self.linear1 = nn.Linear(1024, 512, bias=False)
-        self.bn6 = nn.BatchNorm1d(512)
+        self.linear1 = nn.Linear(1024, 1024, bias=False)
+        self.bn6 = nn.BatchNorm1d(1024)
         self.dp1 = nn.Dropout(p=args.dropout)
-        self.linear2 = nn.Linear(512, 256)
-        self.bn7 = nn.BatchNorm1d(256)
+        self.linear2 = nn.Linear(1024, 1024)
+        self.bn7 = nn.BatchNorm1d(1024)
         self.dp2 = nn.Dropout(p=args.dropout)
-        self.linear3 = nn.Linear(256, output_channels)
+        self.decoder = PointCloudDecoder(input_channels=1024, output_channels=output_channels)
 
     def forward(self, x):
         xyz = x.permute(0, 2, 1)
@@ -70,9 +102,9 @@ class Pct(nn.Module):
         x = self.dp1(x)
         x = F.leaky_relu(self.bn7(self.linear2(x)), negative_slope=0.2)
         x = self.dp2(x)
-        x = self.linear3(x)
-
-        return x
+        
+        completed_point_cloud = self.decoder(x)
+        return completed_point_cloud
 
 class Point_Transformer_Last(nn.Module):
     def __init__(self, args, channels=256):

@@ -1,16 +1,31 @@
 import os
 import glob
-import h5py
 import numpy as np
 from torch.utils.data import Dataset
+from scipy.spatial.distance import pdist, cdist, squareform
 
+# Skips the first 2 lines of the .off file and reads the rest
+def read_off(off_path):
+    with open(off_path, 'r') as f:
+        if 'OFF' != f.readline().strip():
+            return []
+
+        n_verts, _, _ = tuple([int(s) for s in f.readline().strip().split(' ')])
+        vertices = []
+        for i in range(n_verts):
+            vert = [float(s) for s in f.readline().strip().split(' ')]
+            vertices.append(vert)
+
+        return vertices
+
+# Downloads the ModelNet dataset to the data folder and unzips it
 def download():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     if not os.path.exists(DATA_DIR):
         os.mkdir(DATA_DIR)
-    if not os.path.exists(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048')):
-        www = 'https://shapenet.cs.stanford.edu/media/modelnet40_ply_hdf5_2048.zip'
+    if not os.path.exists(os.path.join(DATA_DIR, 'ModelNet10')):
+        www = 'http://3dvision.princeton.edu/projects/2014/3DShapeNets/ModelNet10.zip'
         zipfile = os.path.basename(www)
         os.system('wget %s; unzip %s' % (www, zipfile))
         os.system('mv %s %s' % (zipfile[:-4], DATA_DIR))
@@ -21,17 +36,12 @@ def load_data(partition):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     all_data = []
-    all_label = []
-    for h5_name in glob.glob(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048', 'ply_data_%s*.h5'%partition)):
-        f = h5py.File(h5_name)
-        data = f['data'][:].astype('float32')
-        label = f['label'][:].astype('int64')
-        f.close()
-        all_data.append(data)
-        all_label.append(label)
-    all_data = np.concatenate(all_data, axis=0)
-    all_label = np.concatenate(all_label, axis=0)
-    return all_data, all_label
+    all_labels = []
+    for off_path in glob.glob(os.path.join(DATA_DIR, 'ModelNet10', f'*/{partition}/*.off')):
+        pcd = read_off(off_path)
+        all_data.append(np.array(pcd))
+        all_labels.append(off_path.split('/')[-3])
+    return all_data, all_labels
 
 def random_point_dropout(pc, max_dropout_ratio=0.875):
     ''' batch_pc: BxNx3 '''
@@ -56,14 +66,55 @@ def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.02):
     pointcloud += np.clip(sigma * np.random.randn(N, C), -1*clip, clip)
     return pointcloud
 
+# original_pcd is one numpy array (Data of one .off file)
+def filter_point_cloud(original_pcd):
+    # Choose a random point
+    random_point = np.random.choice(original_pcd, size=1, replace=False)
+    radius = calculate_radius(original_pcd, 0.05)
 
-class ModelNet40(Dataset):
+    # Find points outside the sphere
+    distances = cdist(original_pcd, random_point)
+    points_outside_sphere = original_pcd[distances > radius]
+
+    return points_outside_sphere, original_pcd
+
+# original_pcd is one numpy array (Data of one .off file)
+def visualize_point_cloud(original_pcd, filtered_array):
+    import open3d as o3d
+    # Create Open3D point cloud objects
+    original_pcd = o3d.geometry.PointCloud()
+    original_pcd.points = o3d.utility.Vector3dVector(original_pcd)
+
+    filtered_pcd = o3d.geometry.PointCloud()
+    filtered_pcd.points = o3d.utility.Vector3dVector(filtered_array)
+
+    # Visualize point clouds
+    o3d.visualization.draw_geometries([original_pcd, filtered_pcd])
+
+# original_pcd is one numpy array (Data of one .off file)
+# if distance_percentage is 0.05, it means the 5% of the maximum distance
+def calculate_radius(original_pcd, distance_percentage):
+    # Compute pairwise distances between points
+    pairwise_distances = squareform(pdist(original_pcd))
+    
+    # Find the farthest two points
+    max_distance = np.max(pairwise_distances)
+    
+    # Calculate radius as a percentage of the maximum distance
+    radius = distance_percentage * max_distance
+    
+    return radius
+
+class ModelNet10(Dataset):
     def __init__(self, num_points, partition='train'):
         self.data, self.label = load_data(partition)
         self.num_points = num_points
         self.partition = partition        
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: int):
+        # TODO
+        # 1) Point cloud'in icinden random bir point sec, ve onun etrafindaki n point'i yok et (belli bir radius)
+        # 2) Return values: 1->kirpilmis point cloud       2->full point cloud
         pointcloud = self.data[item][:self.num_points]
         label = self.label[item]
         if self.partition == 'train':
@@ -73,12 +124,12 @@ class ModelNet40(Dataset):
         return pointcloud, label
 
     def __len__(self):
-        return self.data.shape[0]
+        return len(self.data)
 
 
 if __name__ == '__main__':
-    train = ModelNet40(1024)
-    test = ModelNet40(1024, 'test')
+    train = ModelNet10(1024)
+    test = ModelNet10(1024, 'test')
     for data, label in train:
         print(data.shape)
         print(label.shape)
